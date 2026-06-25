@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, String, Text, DateTime
+from sqlalchemy import Column, ForeignKey, Integer, String, Text, DateTime, LargeBinary, JSON, Float
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime, timezone
@@ -69,3 +69,44 @@ class Interview(Base):
     question = Column(Text)
     answer = Column(Text)
     score = Column(Integer)
+
+
+class InterviewRoom(Base):
+    __tablename__ = "interview_rooms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(String, unique=True, index=True, nullable=False)
+    interviewer_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    resume_filename = Column(String, nullable=True)
+    resume_data = Column(LargeBinary, nullable=True)
+    jd_filename = Column(String, nullable=True)
+    jd_data = Column(LargeBinary, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ExtractedSkill(Base):
+    __tablename__ = "extracted_skills"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(String, ForeignKey("interview_rooms.room_id"), nullable=False, index=True)
+    skill = Column(String, nullable=False)
+    source = Column(String, nullable=False)  # "resume" or "jd"
+    confidence = Column(Float, default=1.0)  # Confidence score 0-1
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class InterviewQuestion(Base):
+    __tablename__ = "interview_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(String, ForeignKey("interview_rooms.room_id"), nullable=False, index=True)
+    question = Column(Text, nullable=False)
+    skill = Column(String, nullable=True)
+    difficulty = Column(String, nullable=False)  # "easy", "intermediate", "advanced"
+    category = Column(String, nullable=False)  # "technical", "behavioral", "situational"
+    answer = Column(Text, nullable=True)
+    score = Column(Float, nullable=True)
+    feedback = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

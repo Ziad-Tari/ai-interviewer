@@ -8,6 +8,9 @@ import {
   useState,
 } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import DocumentUploader from "./DocumentUploader";
+import SkillDisplay from "./SkillDisplay";
+import InterviewQuestions from "./InterviewQuestions";
 
 type ChatMessage = {
   id: string;
@@ -43,6 +46,20 @@ type SocketMessage =
       senderId?: string;
     }
   | {
+      type: "ai_question";
+      id: number;
+      question: string;
+      skill: string | null;
+      difficulty: string;
+      category: string;
+      generated_at: string;
+      generated_from_conversation?: boolean;
+    }
+  | {
+      type: "ai_error";
+      message: string;
+    }
+  | {
       type: "signal";
       senderId?: string;
       senderName?: string;
@@ -51,6 +68,10 @@ type SocketMessage =
         | { kind: "offer"; offer: RTCSessionDescriptionInit }
         | { kind: "answer"; answer: RTCSessionDescriptionInit }
         | { kind: "ice"; candidate: RTCIceCandidateInit };
+    }
+  | {
+      type: "ai_generate_question";
+      difficulty?: string;
     };
 
 type InterviewRoomProps = {
@@ -91,6 +112,15 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
   );
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteStatus, setInviteStatus] = useState("");
+  const [extractedSkills, setExtractedSkills] = useState<string[]>([]);
+  const [aiQuestions, setAiQuestions] = useState<{
+    id: number;
+    question: string;
+    skill: string | null;
+    difficulty: string;
+    category: string;
+    generated_at: string;
+  }[]>([]);
   const candidateInviteUrl = `/interview/${roomId}`;
   const inviteUrl = origin ? `${origin}${candidateInviteUrl}` : candidateInviteUrl;
   const roleLabel =
@@ -455,6 +485,21 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
           );
         }
 
+        if (data.type === "ai_question") {
+          // append live AI-generated question to local state
+          setAiQuestions((current) => [
+            ...current,
+            {
+              id: data.id,
+              question: data.question,
+              skill: data.skill,
+              difficulty: data.difficulty,
+              category: data.category,
+              generated_at: data.generated_at,
+            },
+          ]);
+        }
+
         if (data.type === "signal") {
           await handleSignal(data);
         }
@@ -620,6 +665,21 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
 
       <div className="mx-auto grid max-w-7xl gap-6 px-6 py-6 lg:grid-cols-[1fr_380px]">
         <section className="space-y-6">
+          {currentUser.role === "interviewer" && (
+            <>
+              <DocumentUploader roomId={roomId} />
+              <SkillDisplay
+                roomId={roomId}
+                onSkillsExtracted={setExtractedSkills}
+              />
+              <InterviewQuestions
+                roomId={roomId}
+                skillCount={extractedSkills.length}
+                sendSocketMessage={sendSocketMessage}
+                liveQuestions={aiQuestions}
+              />
+            </>
+          )}
           <div className="grid gap-4 xl:grid-cols-2">
             <div className="overflow-hidden rounded-lg border border-[#ddd6cb] bg-[#102820] shadow-[0_12px_40px_rgba(16,40,32,0.08)]">
               <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 text-white">
