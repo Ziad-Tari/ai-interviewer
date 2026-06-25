@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { authHeaders, apiUrl } from "../lib/api";
 
 type DocumentUploaderProps = {
   roomId: string;
@@ -29,9 +30,9 @@ export default function DocumentUploader({
 
   const fetchDocumentStatus = async () => {
     try {
-      const response = await fetch(
-        `http://localhost:8000/interviews/rooms/${roomId}/documents`
-      );
+      const response = await fetch(apiUrl(`/interviews/rooms/${roomId}/documents`), {
+        headers: authHeaders(),
+      });
       if (response.ok) {
         const data = await response.json();
         setDocumentStatus({
@@ -60,11 +61,12 @@ export default function DocumentUploader({
       formData.append("file", file);
 
       const response = await fetch(
-        `http://localhost:8000/interviews/rooms/${roomId}/upload/${documentType}`,
+        apiUrl(`/interviews/rooms/${roomId}/upload/${documentType}`),
         {
           method: "POST",
+          headers: authHeaders(),
           body: formData,
-        }
+        },
       );
 
       if (response.ok) {

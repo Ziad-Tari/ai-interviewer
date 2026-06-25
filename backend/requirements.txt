@@ -1,6 +1,8 @@
 fastapi
 uvicorn
 sqlalchemy
+alembic
+python-dotenv
 python-multipart
 python-docx
 pdfminer.six

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { apiFetch } from "../lib/api";
 
 type SkillDisplayProps = {
   roomId: string;
@@ -32,12 +33,9 @@ export default function SkillDisplay({
     setError("");
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/interviews/rooms/${roomId}/extract-skills`,
-        {
-          method: "POST",
-        }
-      );
+      const response = await apiFetch(`/interviews/rooms/${roomId}/extract-skills`, {
+        method: "POST",
+      });
 
       if (response.ok) {
         const data = await response.json();

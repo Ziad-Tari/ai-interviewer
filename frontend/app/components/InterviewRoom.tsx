@@ -11,6 +11,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import DocumentUploader from "./DocumentUploader";
 import SkillDisplay from "./SkillDisplay";
 import InterviewQuestions from "./InterviewQuestions";
+import { apiFetch, getAccessToken } from "../lib/api";
+import { getWsUrl } from "../lib/config";
 
 type ChatMessage = {
   id: string;
@@ -160,12 +162,8 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
         const token = localStorage.getItem("access_token");
         if (token) {
           try {
-            await fetch("http://localhost:8000/invites", {
+            await apiFetch("/invites", {
               method: "POST",
-              headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-              },
               body: JSON.stringify({
                 room_id: roomId,
                 recipient_email: recipientEmail.trim(),
@@ -195,12 +193,7 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
       }
 
       try {
-        const response = await fetch("http://localhost:8000/auth/me", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
+        const response = await apiFetch("/auth/me");
 
         if (!response.ok) {
           throw new Error("Authentication required");
@@ -412,10 +405,14 @@ export default function InterviewRoom({ roomId }: InterviewRoomProps) {
       return;
     }
 
-    const token = localStorage.getItem("access_token");
-    const socketUrl = token
-      ? `ws://localhost:8000/ws/interviews/${roomId}?token=${encodeURIComponent(token)}`
-      : `ws://localhost:8000/ws/interviews/${roomId}`;
+    const token = getAccessToken();
+    if (!token) {
+      return;
+    }
+
+    const socketUrl = getWsUrl(
+      `/ws/interviews/${roomId}?token=${encodeURIComponent(token)}`,
+    );
     const socket = new WebSocket(socketUrl);
     socketRef.current = socket;
 

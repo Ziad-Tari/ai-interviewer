@@ -2,6 +2,8 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { apiFetch } from "../lib/api";
+import { API_URL } from "../lib/config";
 
 type AuthMode = "signin" | "register";
 type AccountRole = "candidate" | "interviewer";
@@ -31,12 +33,9 @@ export default function AuthPage({ mode }: AuthPageProps) {
     try {
       const endpoint = isRegister ? "/auth/register" : "/auth/login";
       const body = isRegister ? { email, password, role } : { email, password };
-      const res = await fetch(`http://localhost:8000${endpoint}`, {
+      const res = await apiFetch(endpoint, {
         method: "POST",
         credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify(body),
       });
 
@@ -63,7 +62,7 @@ export default function AuthPage({ mode }: AuthPageProps) {
       setMessage(
         error instanceof Error
           ? error.message
-          : "Could not reach the backend on http://localhost:8000.",
+          : `Could not reach the backend on ${API_URL}.`,
       );
     } finally {
       setIsLoading(false);

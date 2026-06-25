@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import StartInterviewRoomButton from "../components/StartInterviewRoomButton";
 import MyInterviewsPanel from "../components/MyInterviewsPanel";
+import { apiFetch } from "../lib/api";
 
 const interviews = [
   {
@@ -136,12 +137,7 @@ export default function DashboardPage() {
       }
 
       try {
-        const response = await fetch("http://localhost:8000/auth/me", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
+        const response = await apiFetch("/auth/me");
 
         if (!response.ok) {
           throw new Error("Authentication required");
@@ -181,12 +177,7 @@ export default function DashboardPage() {
         if (!token) return;
 
         try {
-          const response = await fetch("http://localhost:8000/invites/received", {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          });
+          const response = await apiFetch("/invites/received");
 
           if (response.ok) {
             const data = (await response.json()) as Array<{

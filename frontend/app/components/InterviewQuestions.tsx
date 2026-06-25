@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { apiFetch } from "../lib/api";
 
 type LiveQuestion = {
   id: number;
@@ -56,11 +57,11 @@ export default function InterviewQuestions({
     setError("");
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/interviews/rooms/${roomId}/generate-questions?num_questions=${numQuestions}&difficulty=${difficulty}`,
+      const response = await apiFetch(
+        `/interviews/rooms/${roomId}/generate-questions?num_questions=${numQuestions}&difficulty=${difficulty}`,
         {
           method: "POST",
-        }
+        },
       );
 
       if (response.ok) {
@@ -83,15 +84,12 @@ export default function InterviewQuestions({
     if (!questionId) return;
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/interviews/rooms/${roomId}/questions/${questionId}/answer`,
+      const response = await apiFetch(
+        `/interviews/rooms/${roomId}/questions/${questionId}/answer`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
           body: JSON.stringify({ answer }),
-        }
+        },
       );
 
       if (response.ok) {

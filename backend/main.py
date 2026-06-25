@@ -1,23 +1,36 @@
-import hashlib
-import os
-import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database import engine, Base
 import models
-from database import SessionLocal
 from ai_service import AIService, OpenAIService
+from auth import (
+    create_access_token,
+    default_full_name_from_email,
+    get_current_user,
+    get_user_from_token,
+    get_user_role_and_name,
+    hash_password,
+    normalize_email,
+    require_interviewer,
+    set_auth_cookie,
+    verify_password,
+)
+from config import settings
+from database import SessionLocal, get_db
+from deps import (
+    assign_candidate_if_needed,
+    require_room_interviewer,
+    require_room_member,
+)
 
 # initialize optional OpenAI service (reads OPENAI_API_KEY env var)
-openai_service = OpenAIService()
+openai_service = OpenAIService(api_key=settings.OPENAI_API_KEY)
 
 
 class ConnectionManager:
@@ -263,136 +276,9 @@ class GeneratedQuestionsResponse(BaseModel):
     generated_at: str
 
 
-JWT_SECRET_KEY = os.getenv(
-    "JWT_SECRET_KEY",
-    "dev-only-change-this-secret-with-a-longer-key-1234567890",
-)
-JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    password_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        100_000,
-    ).hex()
-    return f"{salt}:{password_hash}"
-
-
-def verify_password(password: str, stored_password: str) -> bool:
-    salt, password_hash = stored_password.split(":", 1)
-    candidate_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        100_000,
-    ).hex()
-    return secrets.compare_digest(candidate_hash, password_hash)
-
-
-def normalize_email(email: str) -> str:
-    return email.strip().lower()
-
-
-def default_full_name_from_email(email: str) -> str:
-    return email.split("@", 1)[0].replace(".", " ").replace("_", " ").title()
-
-
-def get_user_role_and_name(user: models.User) -> tuple[Literal["candidate", "interviewer"], str]:
-    if user.interviewer_profile:
-        return "interviewer", user.interviewer_profile.full_name
-
-    if user.candidate_profile:
-        return "candidate", user.candidate_profile.full_name
-
-    return "candidate", default_full_name_from_email(user.email)
-
-
-def create_access_token(user: models.User) -> str:
-    role, name = get_user_role_and_name(user)
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-    payload = {
-        "sub": str(user.id),
-        "email": user.email,
-        "role": role,
-        "name": name,
-        "exp": expires_at,
-    }
-    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-
-def decode_access_token(token: str) -> dict:
-    try:
-        return jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired authentication token",
-        ) from exc
-
-
-def set_auth_cookie(response: Response, token: str):
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        httponly=True,
-        secure=COOKIE_SECURE,
-        samesite="none" if COOKIE_SECURE else "lax",
-        path="/",
-    )
-
-
-def get_user_from_token(token: str, db: Session) -> models.User:
-    payload = decode_access_token(token)
-    user_id = payload.get("sub")
-
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token",
-        )
-
-    user = db.query(models.User).filter(models.User.id == int(user_id)).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authenticated user no longer exists",
-        )
-
-    return user
-
-
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
-    token = request.cookies.get("access_token")
-
-    if not token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.lower().startswith("bearer "):
-            token = auth_header.split(" ", 1)[1].strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-        )
-
-    return get_user_from_token(token, db)
+class AnswerSubmission(BaseModel):
+    answer: str
+    score: float | None = None
 
 
 def extract_text_from_file(file_data: bytes, filename: str) -> str:
@@ -447,7 +333,7 @@ app = FastAPI()
 # allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -608,8 +494,18 @@ def chat():
 
 
 @app.post("/interviews/rooms", response_model=InterviewRoomResponse)
-def create_interview_room():
+def create_interview_room(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_interviewer),
+):
     room_id = uuid.uuid4().hex
+    room = models.InterviewRoom(
+        room_id=room_id,
+        interviewer_id=current_user.id,
+    )
+    db.add(room)
+    db.commit()
+    db.refresh(room)
 
     return {
         "room_id": room_id,
@@ -619,36 +515,26 @@ def create_interview_room():
 
 
 @app.post("/interviews/rooms/{room_id}/upload/resume", response_model=DocumentUploadResponse)
-async def upload_resume(room_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_resume(
+    room_id: str,
+    file: UploadFile = File(...),
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+    db: Session = Depends(get_db),
+):
     """Upload resume for an interview room"""
     try:
-        token = None
-        # This would need to be passed via header - adjust based on your auth implementation
-        user = None  # Will be populated from token if passed
-        
-        # Read file content
         file_content = await file.read()
-        
-        # Check if room exists, if not create it
-        room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-        if not room:
-            room = models.InterviewRoom(
-                room_id=room_id,
-                interviewer_id=1,  # This should come from auth
-            )
-            db.add(room)
-        
-        # Update resume
+
         room.resume_filename = file.filename
         room.resume_data = file_content
         room.updated_at = datetime.now(timezone.utc)
         db.commit()
-        
+
         return {
             "room_id": room_id,
             "document_type": "resume",
             "filename": file.filename,
-            "message": f"Resume '{file.filename}' uploaded successfully"
+            "message": f"Resume '{file.filename}' uploaded successfully",
         }
     except Exception as e:
         db.rollback()
@@ -656,32 +542,26 @@ async def upload_resume(room_id: str, file: UploadFile = File(...), db: Session 
 
 
 @app.post("/interviews/rooms/{room_id}/upload/jd", response_model=DocumentUploadResponse)
-async def upload_jd(room_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_jd(
+    room_id: str,
+    file: UploadFile = File(...),
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+    db: Session = Depends(get_db),
+):
     """Upload Job Description for an interview room"""
     try:
-        # Read file content
         file_content = await file.read()
-        
-        # Check if room exists, if not create it
-        room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-        if not room:
-            room = models.InterviewRoom(
-                room_id=room_id,
-                interviewer_id=1,  # This should come from auth
-            )
-            db.add(room)
-        
-        # Update JD
+
         room.jd_filename = file.filename
         room.jd_data = file_content
         room.updated_at = datetime.now(timezone.utc)
         db.commit()
-        
+
         return {
             "room_id": room_id,
             "document_type": "jd",
             "filename": file.filename,
-            "message": f"Job Description '{file.filename}' uploaded successfully"
+            "message": f"Job Description '{file.filename}' uploaded successfully",
         }
     except Exception as e:
         db.rollback()
@@ -689,71 +569,68 @@ async def upload_jd(room_id: str, file: UploadFile = File(...), db: Session = De
 
 
 @app.get("/interviews/rooms/{room_id}/documents", response_model=InterviewRoomDocumentsResponse)
-async def get_room_documents(room_id: str, db: Session = Depends(get_db)):
+async def get_room_documents(
+    room_id: str,
+    room: models.InterviewRoom = Depends(require_room_member),
+):
     """Get document information for an interview room"""
-    room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-    
-    if not room:
-        raise HTTPException(status_code=404, detail="Interview room not found")
-    
     return {
         "room_id": room_id,
         "resume_filename": room.resume_filename,
         "jd_filename": room.jd_filename,
         "has_resume": room.resume_data is not None,
-        "has_jd": room.jd_data is not None
+        "has_jd": room.jd_data is not None,
     }
 
 
 @app.get("/interviews/rooms/{room_id}/download/resume")
-async def download_resume(room_id: str, db: Session = Depends(get_db)):
+async def download_resume(
+    room_id: str,
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+):
     """Download resume for an interview room"""
-    room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-    
-    if not room or not room.resume_data:
+    if not room.resume_data:
         raise HTTPException(status_code=404, detail="Resume not found")
-    
+
     return Response(
         content=room.resume_data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={room.resume_filename}"}
+        headers={"Content-Disposition": f"attachment; filename={room.resume_filename}"},
     )
 
 
 @app.get("/interviews/rooms/{room_id}/download/jd")
-async def download_jd(room_id: str, db: Session = Depends(get_db)):
+async def download_jd(
+    room_id: str,
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+):
     """Download Job Description for an interview room"""
-    room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-    
-    if not room or not room.jd_data:
+    if not room.jd_data:
         raise HTTPException(status_code=404, detail="Job Description not found")
-    
+
     return Response(
         content=room.jd_data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={room.jd_filename}"}
+        headers={"Content-Disposition": f"attachment; filename={room.jd_filename}"},
     )
 
 
 @app.post("/interviews/rooms/{room_id}/extract-skills", response_model=ExtractedSkillsResponse)
-async def extract_skills(room_id: str, db: Session = Depends(get_db)):
+async def extract_skills(
+    room_id: str,
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+    db: Session = Depends(get_db),
+):
     """Extract skills from resume and job description"""
     try:
-        room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-        
-        if not room:
-            raise HTTPException(status_code=404, detail="Interview room not found")
-        
-        # Extract text from resume and JD
         resume_text = ""
         jd_text = ""
-        
+
         if room.resume_data:
             resume_text = extract_text_from_file(room.resume_data, room.resume_filename or "resume.txt")
-        
+
         if room.jd_data:
             jd_text = extract_text_from_file(room.jd_data, room.jd_filename or "jd.txt")
-        
         # Extract skills using AI Service
         resume_skills = AIService.extract_skills_from_text(resume_text)
         jd_skills = AIService.extract_skills_from_text(jd_text)
@@ -809,16 +686,11 @@ async def generate_interview_questions(
     room_id: str,
     num_questions: int = 5,
     difficulty: str = "intermediate",
-    db: Session = Depends(get_db)
+    room: models.InterviewRoom = Depends(require_room_interviewer),
+    db: Session = Depends(get_db),
 ):
     """Generate personalized interview questions based on extracted skills"""
     try:
-        room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-        
-        if not room:
-            raise HTTPException(status_code=404, detail="Interview room not found")
-        
-        # Get extracted skills
         skills = db.query(models.ExtractedSkill.skill).filter(
             models.ExtractedSkill.room_id == room_id
         ).distinct().all()
@@ -884,19 +756,17 @@ async def generate_interview_questions(
 
 
 @app.get("/interviews/rooms/{room_id}/questions", response_model=GeneratedQuestionsResponse)
-async def get_interview_questions(room_id: str, db: Session = Depends(get_db)):
+async def get_interview_questions(
+    room_id: str,
+    room: models.InterviewRoom = Depends(require_room_member),
+    db: Session = Depends(get_db),
+):
     """Retrieve generated interview questions for a room"""
     try:
-        room = db.query(models.InterviewRoom).filter(models.InterviewRoom.room_id == room_id).first()
-        
-        if not room:
-            raise HTTPException(status_code=404, detail="Interview room not found")
-        
-        # Get questions
         questions = db.query(models.InterviewQuestion).filter(
             models.InterviewQuestion.room_id == room_id
         ).all()
-        
+
         if not questions:
             raise HTTPException(status_code=404, detail="No questions generated. Please generate questions first.")
         
@@ -935,30 +805,30 @@ async def get_interview_questions(room_id: str, db: Session = Depends(get_db)):
 async def submit_question_answer(
     room_id: str,
     question_id: int,
-    answer: str,
-    score: float | None = None,
-    db: Session = Depends(get_db)
+    payload: AnswerSubmission,
+    room: models.InterviewRoom = Depends(require_room_member),
+    db: Session = Depends(get_db),
 ):
     """Submit answer to an interview question"""
     try:
         question = db.query(models.InterviewQuestion).filter(
             models.InterviewQuestion.id == question_id,
-            models.InterviewQuestion.room_id == room_id
+            models.InterviewQuestion.room_id == room_id,
         ).first()
-        
+
         if not question:
             raise HTTPException(status_code=404, detail="Question not found")
-        
-        question.answer = answer
-        if score is not None:
-            question.score = score
-        
+
+        question.answer = payload.answer
+        if payload.score is not None:
+            question.score = payload.score
+
         db.commit()
-        
+
         return {
             "message": "Answer submitted successfully",
             "question_id": question_id,
-            "score": question.score
+            "score": question.score,
         }
     except HTTPException:
         db.rollback()
@@ -985,6 +855,26 @@ async def interview_room_socket(websocket: WebSocket, room_id: str):
         websocket.state.user_id = user.id
         websocket.state.role = role
         websocket.state.name = name
+
+        room = (
+            db.query(models.InterviewRoom)
+            .filter(models.InterviewRoom.room_id == room_id)
+            .first()
+        )
+        if not room:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        if role == "interviewer":
+            if user.id != room.interviewer_id:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+        else:
+            try:
+                assign_candidate_if_needed(room, user, db)
+            except HTTPException:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
     except HTTPException:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -1007,6 +897,15 @@ async def interview_room_socket(websocket: WebSocket, room_id: str):
             # If interviewer requests an AI-generated question, generate it in real time
             try:
                 if isinstance(data, dict) and data.get("type") == "ai_generate_question":
+                    if websocket.state.role != "interviewer":
+                        await websocket.send_json(
+                            {
+                                "type": "ai_error",
+                                "message": "Only the interviewer can generate questions",
+                            }
+                        )
+                        continue
+
                     difficulty = data.get("difficulty", "intermediate")
                     # Open a DB session for extraction and storing
                     db_ws = SessionLocal()
@@ -1123,5 +1022,3 @@ async def interview_room_socket(websocket: WebSocket, room_id: str):
                 "participant_count": participant_count,
             },
         )
-
-Base.metadata.create_all(bind=engine)
